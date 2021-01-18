@@ -1,2 +1,39 @@
-#Glow
-This is a repo for implementation of glow (repo) and real nvp (repo).
+## Glow in PyTorch
+
+![CIFAR-10 Samples](/images/cifar10.jpg?raw=true "CIFAR-10 Samples")
+
+Implementation of Glow in PyTorch. Based on the paper:
+
+  > [Glow: Generative Flow with Invertible 1x1 Convolutions](https://arxiv.org/abs/1807.03039)\
+  > Diederik P. Kingma, Prafulla Dhariwal\
+  > _arXiv:1807.03039_
+
+
+## Usage
+Use .sh files to execute
+Note that --realnvp use model RealNVP to model toy data
+
+## Samples (K=32, L=3, C=512)
+
+### RealNVP
+
+#### Latent Space
+![Latent Space](/images/z.jpg?raw=true "Latent Space")
+
+#### Inferenced Data
+![Inferenced Data](/images/x.jpg?raw=true "Inferenced Data")
+
+### Epoch 40
+
+![Samples at Epoch 40](/images/cifar10.png?raw=true "Samples at Epoch 40")
+
+## Results (K=32, L=3 C=512)
+
+### Bits per Dimension
+
+| Epoch | Train |
+|-------|-------|
+| 10    | 4.91  |
+| 20    | 4.69  | 
+| 30    | 4.48  |
+| 40    | 4.41  |
