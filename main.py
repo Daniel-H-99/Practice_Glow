@@ -5,13 +5,14 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.backends.cudnn as cudnn
+import torch.nn.functional as F
 import torchvision
 import torchvision.datasets
 import torchvision.transforms as transforms
 import numpy as np
 from torch.utils.data import TensorDataset, DataLoader 
 from dataloader import get_loader
-from utils import AverageMeter, save, load, tensor_2Dplot
+from utils import *
 from model import Glow, RealNVP
 from tqdm import tqdm
 import logging
@@ -19,12 +20,34 @@ import time
 from PIL import Image
 
 def preprocess(args, data):
+    loss = torch.Tensor([0.0]).mean()
     if args.realnvp:
         data = torch.cat(data)
         data = data.unsqueeze(2).unsqueeze(3)
     else:
         data = data[0]
+        data, loss = dequantize(args, data)
+    return data, loss
+
+def dequantize(args, data):
+    data = (data * (args.dequantized_levels - 1) + torch.rand_like(data)) / args.dequantized_levels
+    data = (2 * data - 1) * args.dequantized_bound 
+    data = (data + 1) / 2
+    data = torch.log(data) - torch.log(1 - data)
+
+    loss = (F.softplus(data) + F.softplus(-data) - F.softplus(torch.Tensor([(1 - args.dequantized_bound) / args.dequantized_bound]))).sum() / data.shape[0]
+    return data, -loss
+
+def postprocess(args, data):
+    if not args.realnvp:
+        data = (F.sigmoid(data) * (2 ** args.bits)).floor() / (2 ** args.bits)
+    else:
+        data = data.squeeze()
+
     return data
+
+def bits_per_dimensions(args, loss):
+	return loss / (np.log(2) * args.pixels)
 
 class PriorDistribution():
     def __init__(self, args, prior):
@@ -44,23 +67,23 @@ def main(args):
     
     # set environmet
     cudnn.benchmark = True
-    
-    if not os.path.isdir('./ckpt'):
-        os.mkdir('./ckpt')
-    if not os.path.isdir('./results'):
-        os.mkdir('./results')    
-    if not os.path.isdir(os.path.join('./ckpt', args.name)):
-        os.mkdir(os.path.join('./ckpt', args.name))
-    if not os.path.isdir(os.path.join('./results', args.name)):
-        os.mkdir(os.path.join('./results', args.name))
-    if not os.path.isdir(os.path.join('./results', args.name, "log")):
-        os.mkdir(os.path.join('./results', args.name, "log"))
+
+    if not os.path.isdir(os.path.join(args.path, './ckpt')):
+        os.mkdir(os.path.join(args.path,'./ckpt'))
+    if not os.path.isdir(os.path.join(args.path,'./results')):
+        os.mkdir(os.path.join(args.path,'./results'))    
+    if not os.path.isdir(os.path.join(args.path, './ckpt', args.name)):
+        os.mkdir(os.path.join(args.path, './ckpt', args.name))
+    if not os.path.isdir(os.path.join(args.path, './results', args.name)):
+        os.mkdir(os.path.join(args.path, './results', args.name))
+    if not os.path.isdir(os.path.join(args.path, './results', args.name, "log")):
+        os.mkdir(os.path.join(args.path, './results', args.name, "log"))
 
     # set logger
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     formatter = logging.Formatter('%(asctime)s - %(message)s')
-    handler = logging.FileHandler("results/{}/log/{}.log".format(args.name, time.strftime('%c', time.localtime(time.time()))))
+    handler = logging.FileHandler(os.path.join(args.path, "results/{}/log/{}.log".format(args.name, time.strftime('%c', time.localtime(time.time())))))
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     logger.addHandler(logging.StreamHandler())
@@ -84,12 +107,15 @@ def main(args):
         args.logger.info("loading data...")
         loader = get_loader(args, name='realnvp_toydata.csv')
     else:
-        transform_train = transforms.Compose([
-#             transforms.RandomHorizontalFlip(),
+        transform_cifar = transforms.Compose([
+            transforms.RandomHorizontalFlip(),
+			# transforms.CenterCrop(160),
+			# transforms.Resize(128),
             transforms.ToTensor()
         ])
-        dataset = torchvision.datasets.CIFAR10(root=args.datadir, train=True, download=True, transform=transform_train)
+        dataset = torchvision.datasets.CIFAR10(root=os.path.join(args.path, args.data_dir), train=True, download=True, transform=transform_cifar)
         loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
+
 
     # 2. setup
     
@@ -98,31 +124,35 @@ def main(args):
     model = RealNVP(args) if args.realnvp else Glow(args)
     model.to(args.device)
     prior = PriorDistribution(args, torch.distributions.multivariate_normal.MultivariateNormal(torch.zeros(args.pixels).to(args.device), torch.eye(args.pixels).to(args.device)))
-    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
-    
+    optimizer = optim.Adamax(model.parameters(), lr=args.learning_rate, weight_decay=5e-5)
+    lr_lambda = lambda epoch: min(1.0, (epoch + 1) / args.warmup) 
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+
     if args.load:
-        model.load_state_dict(load(args, args.ckpt))
-        
+    	loaded_data = load(args, args.ckpt)
+    	model.load_state_dict(loaded_data['model'])
+    	optimizer.load_state_dict(loaded_data['optimizer'])
+
     # 3. train / test
     
     if not args.test:
         # train
         args.logger.info("starting training")
-        train_loss_meter = AverageMeter(name="Loss", save_all=True, save_dir=os.path.join('results', args.name), x_label="epoch")
+        train_loss_meter = AverageMeter(args, name="Loss", save_all=True, x_label="epoch")
         steps = 0
         for epoch in range(1, 1 + args.epochs):
             spent_time = time.time()
             model.train()
-            train_loss_tmp_meter = AverageMeter()
+            train_loss_tmp_meter = AverageMeter(args)
             for data in tqdm(loader):
                 if args.start_from_step is not None:
                     if steps < args.start_from_step:
                         steps += 1
                         continue
                 optimizer.zero_grad()
-                data = preprocess(args, data)
+                data, loss = preprocess(args, data)
                 batch = data.shape[0]
-                z, loss = model(data.to(args.device))
+                z, loss = model(data.to(args.device), loss=loss.to(args.device))
                 assert z.shape == (batch, args.pixels)
                 loss += prior.mean_log_prob(z)
                 loss.backward()
@@ -131,18 +161,19 @@ def main(args):
                 train_loss_tmp_meter.update(loss, weight=batch)
                 steps += 1
                 
+                # validate and save
                 if steps % args.save_period == 0:
                     model.eval()
                     spent_time = time.time()
-                    save(args, "epoch_{}".format(epoch), model.state_dict())
+                    save(args, "last", {'model': model.state_dict(),
+                    										'optimizer': optimizer.state_dict()})
                     if args.realnvp:
-                        datas = torch.zeros(0)
+                        original = torch.zeros(0)
                         zs = torch.zeros(0)
                         xs = torch.zeros(0)
 
                         for data in tqdm(loader):
-                            data = torch.cat(data)
-                            data = preprocess(args, data)
+                            data, _ = preprocess(args, data)
                             batch = data.shape[0]
 
                             with torch.no_grad():
@@ -154,122 +185,78 @@ def main(args):
                             x = x.squeeze()
                             assert z.shape == (batch, args.pixels)
                             assert x.shape == (batch, args.channels)
-                            datas = torch.cat((datas, data))
+                            original = torch.cat((original, data))
                             zs = torch.cat((zs, z.cpu()))
                             xs = torch.cat((xs, x.cpu()))
+
+                        plot_2D(args, original[:, 0], original[:, 1], name='[{}]toyplot_data'.format(epoch))                    
+                        plot_2D(args, zs[:, 0], zs[:, 1], name='[{}]toyplot_z'.format(epoch))
+                        plot_2D(args, xs[:, 0], xs[:, 1], name='[{}]toyplot_x'.format(epoch))
+
                     else:
-                        z = prior.sample(args.batch_size)
-                        x = model.decode(z)
-                        assert x.shape == (args.batch_size, args.channels, args.width, args.height)
-                        
-                        for i in range(x.shape[0]):
-                            img = transforms.ToPILImage()(x[i])
-                            img.save(os.path.join('./results', args.name, 'epoch[{}]-{}.jpg'.format(epoch, i + 1)))
-                            
-                    if args.realnvp:
-                        tensor_2Dplot(datas, save_dir=os.path.join('results', args.name), name='[{}]toyplot_data'.format(epoch))                    
-                        tensor_2Dplot(zs, save_dir=os.path.join('results', args.name), name='[{}]toyplot_z'.format(epoch))
-                        tensor_2Dplot(xs, save_dir=os.path.join('results', args.name), name='[{}]toyplot_x'.format(epoch))
+                        z = prior.sample(args.display_size)
+                        x = postprocess(args, model.decode(z))
+                        assert x.shape == (args.display_size, args.channels, args.width, args.height)
+                        grids = torchvision.utils.make_grid(x, nrow=int(np.sqrt(args.display_size)))
+                        display = transforms.ToPILImage()(grids)
+                        display.save(os.path.join(args.path, args.result_dir, args.name, 'step{}.jpg'.format(steps)))
                     
                     spent_time = time.time() - spent_time
                     args.logger.info("[{}] plot recorded, took {} seconds".format(steps, spent_time))
-                    args.logger.info(str(model.parameters()))
                     train_loss_meter.save()
                 
-            train_loss_meter.update(train_loss_tmp_meter.avg)
+            if args.realnvp:
+                train_loss_meter.update(train_loss_tmp_meter.avg)
+            else:
+                train_loss_meter.update(bits_per_dimensions(args, train_loss_tmp_meter.avg))
             spent_time = time.time() - spent_time
-            args.logger.info("[{}] train loss: {:.3f} took {:.1f} seconds".format(epoch, train_loss_tmp_meter.avg, spent_time))
-            
-            # validation
-            if epoch % args.save_period == 0:
-                pass
-#                 model.eval()
-#                 spent_time = time.time()
-#                 save(args, "epoch_{}".format(epoch), model.state_dict())
-#                 if args.realnvp:
-#                     datas = torch.zeros(0)
-#                     zs = torch.zeros(0)
-#                     xs = torch.zeros(0)
-                    
-#                     for data in tqdm(loader):
-#                         data = torch.cat(data)
-#                         data = preprocess(args, data)
-#                         batch = data.shape[0]
-
-#                         with torch.no_grad():
-#                             z, _ = model(data.to(args.device))
-#                             x = model.decode(z)
-
-#                         data = data.squeeze()
-#                         z = z.squeeze()
-#                         x = x.squeeze()
-#                         assert z.shape == (batch, args.pixels)
-#                         assert x.shape == (batch, args.channels)
-#                         datas = torch.cat((datas, data))
-#                         zs = torch.cat((zs, z.cpu()))
-#                         xs = torch.cat((xs, x.cpu()))
-#                 else:
-#                     z = prior.sample(args.batch_size)
-#                     x = model.decode(z)
-#                     assert x.shape == (args.batch_size, args.channels, args.width, args.height)
-#                     img_array = x.transpose(1, 2).transpose(2, 3).squeeze().numpy()
-#                     for i in range(x.shape[0]):
-#                         img = Image.fromarray(img_array[i])
-#                         im.save(os.path.join(args.result, 'epoch[{}]-{}'.format(epoch, i + 1)))
-                        
-                    
-#                 if args.realnvp:
-#                     tensor_2Dplot(datas, save_dir=os.path.join('results', args.name), name='[{}]toyplot_data'.format(epoch))                    
-#                     tensor_2Dplot(zs, save_dir=os.path.join('results', args.name), name='[{}]toyplot_z'.format(epoch))
-#                     tensor_2Dplot(xs, save_dir=os.path.join('results', args.name), name='[{}]toyplot_x'.format(epoch))
-                    
-#                 spent_time = time.time() - spent_time
-#                 args.logger.info("[{}] plot recorded, took {} seconds".format(epoch, spent_time))
-#                 args.logger.info(str(model.parameters()))
-#                 train_loss_meter.save()
+            if args.realnvp:
+                args.logger.info("[{}] train loss: {:.3f} took {:.1f} seconds".format(epoch, train_loss_tmp_meter.avg, spent_time))
+            else:
+                args.logger.info("[{}] train loss: {:.3f} bpd: {:.3f} took {:.1f} seconds".format(epoch, train_loss_tmp_meter.avg, bits_per_dimensions(args, train_loss_tmp_meter.avg), spent_time))
+            scheduler.step()
     else:
-        pass
         # test
-#         args.logger.info("starting test")
-#         test_loader = get_loader(src['test'], tgt['test'], src_vocab, tgt_vocab, batch_size=args.batch_size)
-#         pred_list = []
-#         model.eval()
+        args.logger.info("starting test")
+        model.eval()
         
-#         for src_batch, tgt_batch in test_loader:
-#             #src_batch: (batch x source_length)
-#             src_batch = torch.Tensor(src_batch).long().to(args.device)
-#             batch = src_batch.shape[0]           
-#             pred_batch = torch.zeros(batch, 1).long().to(args.device)
-#             pred_mask = torch.zeros(batch, 1).bool().to(args.device)    # mask whether each sentece ended up
+        for epoch in range(1, 1 + args.epochs):
+            spent_time = time.time()
+            z = prior.sample(args.display_size)
+            with torch.no_grad():
+                x = postprocess(args, model.decode(z))
+            assert x.shape == (args.display_size, args.channels)
             
-#             with torch.no_grad():
-#                 for _ in range(args.max_length):
-#                     pred = model(src_batch, pred_batch)   # (batch x length x tgt_vocab_size)
-#                     pred[:, :, pad_idx] = -1              # ignore <pad>
-#                     pred = pred.max(dim=-1)[1][:, -1].unsqueeze(-1)   # next word prediction: (batch x 1)
-#                     pred = pred.masked_fill(pred_mask, 2).long()      # fill out <pad> for ended sentences
-#                     pred_mask = torch.gt(pred.eq(1) + pred.eq(2), 0)
-#                     pred_batch = torch.cat([pred_batch, pred], dim=1)
-#                     if torch.prod(pred_mask) == 1:
-#                         break
-                        
-#             pred_batch = torch.cat([pred_batch, torch.ones(batch, 1).long().to(args.device) + pred_mask.long()], dim=1)   # close all sentences
-#             pred_list += seq2sen(pred_batch.cpu().numpy().tolist(), tgt_vocab)
-            
-#         with open('results/pred.txt', 'w', encoding='utf-8') as f:
-#             for line in pred_list:
-#                 f.write('{}\n'.format(line))
-
-#         os.system('bash scripts/bleu.sh results/pred.txt multi30k/test.de.atok')
-
+            if args.realnvp:
+                plot_2D(args, x[:, 0], x[:, 1], name='[Test] toyplot_x')
+            else:
+                grids = torchvision.utils.make_grid(x, nrow=int(np.sqrt(args.display_size)))
+                display = transforms.ToPILImage()(grids)
+                display.save(os.path.join(args.path, args.result_dir, args.name, 'test.jpg'))
+    
+            spent_time = time.time() - spent_time
+            args.logger.info("Test[{}] took {:.1f} seconds".format(epoch, spent_time))
+        
 
 if __name__ == '__main__':
     # set args
     parser = argparse.ArgumentParser(description='Glow')
     parser.add_argument(
-        '--datadir',
+        '--data_dir',
         type=str,
         default='dataset')
+    parser.add_argument(
+        '--result_dir',
+        type=str,
+        default='results')
+    parser.add_argument(
+        '--ckpt_dir',
+        type=str,
+        default="ckpt")
+    parser.add_argument(
+        '--path',
+        type=str,
+        default='.')
     parser.add_argument(
         '--epochs',
         type=int,
@@ -279,9 +266,13 @@ if __name__ == '__main__':
         type=float,
         default=1e-5)
     parser.add_argument(
+    	'--warmup',
+    	type=int,
+    	default=5),
+    parser.add_argument(
         '--batch_size',
         type=int,
-        default=75)
+        default=64)
     parser.add_argument(
         '--num_workers',
         type=int,
@@ -294,10 +285,6 @@ if __name__ == '__main__':
         type=int,
         default=5)
     parser.add_argument(
-        '--ckpt_dir',
-        type=str,
-        default="ckpt")
-    parser.add_argument(
         '--name',
         type=str,
         default="train")
@@ -308,7 +295,6 @@ if __name__ == '__main__':
     parser.add_argument(
         '--load',
         action='store_true')
-    
     parser.add_argument(
         '--K',
         type=int,
@@ -344,13 +330,25 @@ if __name__ == '__main__':
         '--dequantized',
         action='store_true')
     parser.add_argument(
+    	'--bits',
+    	type=int,
+    	default=8)
+    parser.add_argument(
         '--dequantized_levels',
         type=int,
         default=256)
     parser.add_argument(
+		'--dequantized_bound',
+		type=float,
+		default=0.9)
+    parser.add_argument(
         '--start_from_step',
         type=int,
         default=None)
+    parser.add_argument(
+    	'--display_size',
+    	type=int,
+    	default=64)
     
     args = parser.parse_args()
 

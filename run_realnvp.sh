@@ -1,0 +1,15 @@
+python main.py \
+    --name 'RealNVP_K6' \
+    --save_period 200 \
+    --epochs 1 \
+    --display_size 300 \
+    --learning_rate 1e-3 \
+    --dequantized \
+    --nn_kernel 1 \
+    --nn_channels 512 \
+    --channels 2 \
+    --width 1 \
+    --height 1 \
+    --realnvp \
+    --K 6 \
+    --L 1

@@ -1,8 +1,5 @@
 python main.py \
     --name 'Glow_CIFAR10_K16_L3' \
-    --load \
-    --ckpt Glow_MNIST_K16_L3/epoch_1 \
-    --start_from_step 600 \
     --save_period 200 \
     --epochs 100 \
     --learning_rate 1e-3 \
@@ -12,5 +9,5 @@ python main.py \
     --channels 3 \
     --width 32 \
     --height 32 \
-    --K 16 \
+    --K 32 \
     --L 3

@@ -13,15 +13,17 @@ class RealNVP(nn.Module):
         super(RealNVP, self).__init__()
         self.args = args
         self.layers = nn.ModuleList()
-        self.shape = (args.channels, args.width, args.height)
+        self.shape = (args.channels, args.height, args.width)   # shape of single input
         shape = self.shape
-        for k in range(args.K):
+        
+        for k in range(args.K):     # construct a sequence of coupling blocks of length K
             self.layers.append(Flowstep(args, shape))
-        self.layers.append(Split(args, shape, is_last=True))
+            
+        self.layers.append(Split(args, shape, is_last=True))    # does not conduct splitting, but exports latent vectors
     def forward(self, input, loss=0.0):
         return self.encode(input, loss)
     def encode(self, x, loss=0.0):
-        # x: (batch x channel x width x height)
+        # x: (batch x channel x height x width)
         assert x.shape[1:] == self.shape
         z = None
         for layer in self.layers:
@@ -33,16 +35,17 @@ class RealNVP(nn.Module):
         for layer in reversed(self.layers):
             z, x = layer.decode(z, x)
         assert x.shape[1:] == self.shape
-        return x   # (batch x channels x width x height)
+        return x   # (batch x channels x height x width)
     
 class Glow(nn.Module):
     def __init__(self, args):
         super(Glow, self).__init__()
         self.args = args
         self.layers = nn.ModuleList()
-        self.shape = (args.channels, args.width, args.height)
+        self.shape = (args.channels, args.height, args.width)   # shape of single input
         shape = self.shape
-        for l in range(args.L):
+        
+        for l in range(args.L):     # construct a flow of size (L x K)
             self.layers.append(Squeeze(args))
             shape = (shape[0] * 4, shape[1] // 2, shape[2] // 2)
             for k in range(args.K):
@@ -55,7 +58,7 @@ class Glow(nn.Module):
     def forward(self, input, loss=0.0):
         return self.encode(input, loss)
     def encode (self, x, loss):
-        # x: (batch x channel x width x height)
+        # x: (batch x channel x height x width)
         assert x.shape[1:] == self.shape
         z = None
         for layer in self.layers:
@@ -67,26 +70,27 @@ class Glow(nn.Module):
         for layer in reversed(self.layers):
             z, x = layer.decode(z, x)
         assert x.shape[1:] == self.shape
-        return x   # (batch x channels x width x height)
+        return x   # (batch x channels x height x width)
     
 class Squeeze(nn.Module):
     def __init__(self, args):
         super(Squeeze, self).__init__()
     def forward(self, x, loss, z):
-        # (c x w x h) -> (c*4 x w/2 x h/2)
-        b, c, w, h = x.shape
-        x = x.view(b, c, 2, w // 2, 2, h // 2).transpose(3, 4).contiguous().view(b, 4 * c, w // 2, h // 2)
+        # (c x h x w) -> (c*4 x h/2 x w/2)
+        b, c, h, w = x.shape
+        x = x.view(b, c, h // 2, 2, w // 2, 2).permute(0, 1, 3, 5, 2, 4).contiguous().view(b, 4 * c, h // 2, w // 2)
         return x, loss, z
     def decode(self, z, x):
-        b, c, w, h = x.shape
-        x = x.view(b, c // 4, 2, 2, w, h).transpose(3, 4).contiguous().view(b, c // 4, 2 * w, 2 * h)
+        # (c x h x w) -> (c*4 x h/2 x w/2)
+        b, c, h, w = x.shape
+        x = x.view(b, c // 4, 2, 2, h, w).permute(0, 1, 4, 2, 5, 3).contiguous().view(b, c // 4, 2 * h, 2 * w)
         return z, x
     
 class Flowstep(nn.Module):
     def __init__(self, args, shape):
         super(Flowstep, self).__init__()
         self.shape = shape
-        self.layers = nn.ModuleList()
+        self.layers = nn.ModuleList()   # (Actnorm + InvConv + AffineCoupling)
         self.layers.append(Actnorm(args, shape))
         self.layers.append(InvConv(args, shape))
         self.layers.append(AffineCoupling(args, shape))
@@ -105,7 +109,7 @@ class Split(nn.Module):
         super(Split, self).__init__()
         self.shape = shape
         self.is_last = is_last
-    def forward(self, x, loss, z):
+    def forward(self, x, loss, z):  # export half of latent vector and remaining to next step
         shape = x.shape
         assert shape[1:] == self.shape
         if not self.is_last:
@@ -118,7 +122,7 @@ class Split(nn.Module):
         else:
             z = torch.cat((z, pre_z), dim=1)
         return x, loss, z
-    def decode(self, z, x):
+    def decode(self, z, x):     # import latent vector and combine with back propagated representation from next step
         c, w, h = self.shape
         required_pixels = (c // 2) * w * h if not self.is_last else c * w * h
         z, pre_x = z[:, :-required_pixels], z[:, -required_pixels:]
@@ -136,23 +140,23 @@ class Actnorm(nn.Module):
         super(Actnorm, self).__init__()
         self.shape = shape
         self.initialized = False
-        self.bias = nn.Parameter(torch.randn(1, shape[0], 1, 1))   # (1 x channels x 1 x 1)
-        self.scale = nn.Parameter(torch.randn(1, shape[0], 1, 1))    # (1 x channels x 1 x 1)
-    def forward(self, x, loss, z):
+        self.bias = nn.Parameter(torch.zeros(1, shape[0], 1, 1))   # (1 x channels x 1 x 1)
+        self.log_scale = nn.Parameter(torch.zeros(1, shape[0], 1, 1))    # (1 x channels x 1 x 1)
+    def forward(self, x, loss, z):   # s * (x + b)
         shape = x.shape
         assert shape[1:] == self.shape
         if not self.initialized:
             x = x.transpose(0, 1).contiguous().view(shape[1], -1)   # (channels x -1)
             scale = 1 / (x.std(dim=1) + 1e-6)
-            self.scale.data.copy_(scale.unsqueeze(0).unsqueeze(2).unsqueeze(3))
-            self.bias.data.copy_((- x.mean(dim=1) * scale).unsqueeze(0).unsqueeze(2).unsqueeze(3))
+            self.log_scale.data.copy_(scale.log().unsqueeze(0).unsqueeze(2).unsqueeze(3))
+            self.bias.data.copy_(- x.mean(dim=1).unsqueeze(0).unsqueeze(2).unsqueeze(3))
             self.initialized = True
             x = x.view(shape[1], shape[0], shape[2], shape[3]).transpose(0, 1)
-        x = x * self.scale + self.bias
-        loss -= shape[2] * shape[3] * self.scale.abs().log().sum()
+        x = self.log_scale.exp() * (x + self.bias)
+        loss -= shape[2] * shape[3] * self.log_scale.sum()
         return x, loss, z
-    def decode(self, z, x):
-        x = (x - self.bias) / self.scale
+    def decode(self, z, x):   # x / s - b
+        x = x / self.log_scale.exp() - self.bias
         assert x.shape[1:] == self.shape
         return z, x
     
@@ -162,13 +166,13 @@ class InvConv(nn.Module):
         self.args = args
         self.shape = shape
         self.kernel = nn.Parameter(torch.randn(shape[0], shape[0]).qr()[0])
-    def forward(self, x, loss, z):
+    def forward(self, x, loss, z):  # W x
         shape = x.shape
         assert shape[1:] == self.shape
         x = F.conv2d(x, self.kernel.unsqueeze(2).unsqueeze(3))
         loss -= shape[2] * shape[3] * torch.slogdet(self.kernel)[1]
         return x, loss, z
-    def decode(self, z, x):
+    def decode(self, z, x):     # W^(-1) x
         x = F.conv2d(x, self.kernel.double().inverse().float().unsqueeze(2).unsqueeze(3))
         assert x.shape[1:] == self.shape
         return z, x
@@ -178,28 +182,30 @@ class AffineCoupling(nn.Module):
         super(AffineCoupling, self).__init__()
         self.shape = shape
         self.nn = NN(args, (shape[0] // 2, shape[1], shape[2]))
-
-    def forward(self, x, loss, z):
+        self.scale = nn.Parameter(torch.ones(shape[0] // 2, 1, 1))
+    def forward(self, x, loss, z):  # cat(x1, s * (x2 + t))
         shape = x.shape
         assert shape[1:] == self.shape
         x1, x2 = x.chunk(2, dim=1)
         s, t = self.nn(x1)
-        s = F.sigmoid(s + 2.0)
-        x2 = s * (x2 + t)
+        # s = F.sigmoid(s + 2.0)
+        s = self.scale * torch.tanh(s)
+        x2 = s.exp() * (x2 + t)
         x = torch.cat((x1, x2), dim=1)
-        loss -= s.abs().log().view(shape[0], -1).sum(dim=1).mean(dim=0)
+        loss -= s.view(shape[0], -1).sum(dim=1).mean(dim=0)
         return x, loss, z
-    def decode(self, z, x):
+    def decode(self, z, x):     # cat(x1, x2 / s - t))
         x1, x2 = x.chunk(2, dim=1)
         s, t = self.nn(x1)
-        s = F.sigmoid(s + 2.0)
-        x2 = x2 / s - t
+        # s = F.sigmoid(s + 2.0)
+        s = self.scale * torch.tanh(s)
+        x2 = x2 / s.exp() - t
         x = torch.cat((x1, x2), dim=1)
         assert x.shape[1:] == self.shape
         return z, x
 
 class NN(nn.Module):
-    def __init__(self, args, shape):
+    def __init__(self, args, shape):    # (3 conv + 2 ReLU)
         super(NN, self).__init__()
         self.shape = shape
         self.layers = nn.Sequential(nn.Conv2d(shape[0], args.nn_channels, args.nn_kernel, stride=1, padding=(args.nn_kernel - 1) // 2),
@@ -209,7 +215,7 @@ class NN(nn.Module):
                                      nn.Conv2d(args.nn_channels, shape[0] * 2, args.nn_kernel, stride=1, padding=(args.nn_kernel - 1) // 2))
         nn.init.zeros_(self.layers[4].weight)
         nn.init.zeros_(self.layers[4].bias)
-    def forward(self, x):
+    def forward(self, x):   # x -> s, t
         assert x.shape[1:] == self.shape
         x = self.layers(x)
         s, t = x.chunk(2, dim=1)

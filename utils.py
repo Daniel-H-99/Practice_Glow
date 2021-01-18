@@ -2,13 +2,16 @@ import random
 import matplotlib.pyplot as plt
 import torch
 import os
+import numpy as np
 
 # data manager for recording, saving, and plotting
 class AverageMeter(object):
-    def __init__(self, name='noname', save_all=False, save_dir='.', x_label=None):
+    def __init__(self, args, name='noname', save_all=False, surfix='.', x_label=None):
+        self.args = args
         self.name = name
         self.save_all = save_all
-        self.save_dir = save_dir
+        self.surfix = surfix
+        self.path = os.path.join(args.path, args.result_dir, args.name, surfix)
         self.x_label = x_label
         self.reset()
     def reset(self):
@@ -20,6 +23,14 @@ class AverageMeter(object):
         self.count = 0
         if self.save_all:
             self.data = []
+    def load_array(self, data):
+        self.max = max(data)
+        self.min = min(data)
+        self.val = data[-1]
+        self.sum = sum(data)
+        self.count = len(data)
+        if self.save_all:
+            self.data.extend(data)
     def update(self, val, weight=1):
         self.val = val
         self.sum += val * weight
@@ -36,17 +47,19 @@ class AverageMeter(object):
             is_min = True
         return (is_max, is_min)
     def save(self):
-        with open(os.path.join(self.save_dir, "{}.txt".format(self.name)), "w") as file:
+        with open(os.path.join(self.path, "{}.txt".format(self.name)), "w") as file:
             file.write("max: {0:.4f}\nmin: {1:.4f}".format(self.max, self.min))
         if self.save_all:
-            plot = plt.figure()
-            plt.plot(range(1, len(self.data) + 1), self.data)
-            plt.ylabel(self.name)
-            if self.x_label is not None:
-                plt.xlabel(self.x_label)
-            plt.savefig("{}/{}.png".format(self.save_dir, self.name))
-            plt.close(plot)
-            
+            np.savetxt(os.path.join(self.path, "{}.csv".format(self.name)), self.data, delimiter=',')
+    def plot(self, scatter=True):
+        assert self.save_all
+        plot_1D(self.args, self.data, scatter=scatter, surfix=self.surfix, name=self.name, x_label=self.x_label, y_label=self.name)
+    def plot_over(self, rhs, scatter=True, x_label=True, y_label=True, title=None, save=True):
+        assert self.save_all and rhs.save_all
+        plot_2D(self.args, self.data, rhs.data, scatter=scatter, surfix=self.surfix, name=self.name, x_label=self.x_label, y_label=self.name)
+        
+        
+# convert idice of words to real words
 def seq2sen(batch, vocab):
     sen_list = []
 
@@ -57,6 +70,7 @@ def seq2sen(batch, vocab):
 
     return sen_list
 
+# shuffle source and target lists in paired manner
 def shuffle_list(src, tgt):
     index = list(range(len(src)))
     random.shuffle(index)
@@ -81,21 +95,36 @@ def val_check(pred, ans):
 
 # save data, such as model, optimizer
 def save(args, surfix, data):
-    torch.save(data, os.path.join(args.ckpt_dir, args.name, "{}.pt".format(surfix)))
+    torch.save(data, os.path.join(args.path, args.ckpt_dir, args.name, "{}.pt".format(surfix)))
 
 # load data, such as model, optimizer
 def load(args, surfix, map_location='cpu'):
-    return torch.load(os.path.join(args.ckpt_dir, "{}.pt".format(surfix)), map_location=map_location)
+    return torch.load(os.path.join(args.path, args.ckpt_dir, "{}.pt".format(surfix)), map_location=map_location)
 
-# draw 2D plot
-def tensor_2Dplot(x, save_dir='.', name='noname', x_label=None, y_label=None):
-    # x: (-1 x 2)
-    assert x.shape[1] == 2
-    plot = plt.scatter(x[:, 0], x[:, 1])
+# draw 1D plot
+def plot_1D(args, x, scatter=True, surfix='.', name='noname', x_label=None, y_label=None):
+    if scatter:
+        plot = plt.scatter(range(1, 1+ len(x)), x)
+    else:
+        plot = plt.plot(range(1, 1 + len(x)), x)
     if x_label is not None:
         plt.xlabel(x_label)
     if y_label is not None:
         plt.ylabel(y_label)
-    plt.savefig("{}/{}.png".format(save_dir, name))
+    plt.savefig(os.path.join(args.path, args.result_dir, args.name, surfix, "{}.jpg".format(name)))
+    plt.close(plt.gcf())
+    
+# draw 2D plot
+def plot_2D(args, x, y, scatter=True, surfix='.', name='noname', x_label=None, y_label=None):
+    assert len(x) == len(y)
+    if scatter:
+        plot = plt.scatter(x, y)
+    else:
+        plot = plt.plot(x, y)
+    if x_label is not None:
+        plt.xlabel(x_label)
+    if y_label is not None:
+        plt.ylabel(y_label)
+    plt.savefig(os.path.join(args.path, args.result_dir, args.name, surfix, "{}.jpg".format(name)))
     plt.close(plt.gcf())
     
