@@ -1,6 +1,6 @@
 ## Glow in PyTorch
 
-![CIFAR-10 Samples](/images/cifar10.jpg?raw=true "CIFAR-10 Samples")
+![Glow](/images/glow.jpg?raw=true "Glow")
 
 Implementation of Glow in PyTorch. Based on the paper:
 
