@@ -17,13 +17,13 @@ Note that --realnvp use model RealNVP to model toy data
 
 ### RealNVP
 #### Original Data
-![Original Data](/images/data.jpg?raw=true "Original Data"){: height:"50" width:"50"}
+![Original Data](/images/data.jpg?raw=true "Original Data"){: height="50" width="50"}
 #### Latent Space
-![Latent Space](/images/z.jpg?raw=true "Latent Space"){: height:"50" width:"50"}
+![Latent Space](/images/z.jpg?raw=true "Latent Space"){: height="50" width="50"}
 #### Inferenced Data
-![Inferenced Data](/images/x.jpg?raw=true "Inferenced Data"){: height:"50" width:"50"}
+![Inferenced Data](/images/x.jpg?raw=true "Inferenced Data"){: height="50" width="50"}
 ### Epoch 40
-![Samples at Epoch 40](/images/cifar10.jpg?raw=true "Samples at Epoch 40"){: height:"50" width:"50"}
+![Samples at Epoch 40](/images/cifar10.jpg?raw=true "Samples at Epoch 40"){: height="50" width="50"}
 
 ## Results (K=32, L=3 C=512)
 ### Bits per Dimension
